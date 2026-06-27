@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>pedro-llm-router playground</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2d3148;
+    --accent: #6c63ff; --text: #e2e8f0; --muted: #94a3b8;
+    --green: #22c55e; --red: #ef4444; --yellow: #f59e0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 'Segoe UI', system-ui, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header span { color: var(--muted); font-size: 12px; }
+  .layout { display: flex; flex: 1; overflow: hidden; }
+  .sidebar { width: 320px; border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; flex-shrink: 0; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  input, textarea, select {
+    width: 100%; background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 13px; font-family: inherit;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .models-list { display: flex; flex-direction: column; gap: 6px; }
+  .model-row { display: flex; gap: 6px; align-items: center; }
+  .model-row input { flex: 1; }
+  .btn-icon { background: none; border: 1px solid var(--border); color: var(--muted); width: 28px; height: 28px; border-radius: 4px; cursor: pointer; font-size: 14px; flex-shrink: 0; }
+  .btn-icon:hover { border-color: var(--red); color: var(--red); }
+  .btn-add { background: none; border: 1px dashed var(--border); color: var(--muted); width: 100%; padding: 6px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .btn-add:hover { border-color: var(--accent); color: var(--accent); }
+  .send-btn { background: var(--accent); color: #fff; border: none; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; width: 100%; }
+  .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .output-area { flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .message { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; white-space: pre-wrap; font-size: 14px; line-height: 1.7; }
+  .cursor { display: inline-block; width: 2px; height: 1em; background: var(--text); margin-left: 1px; animation: blink 1s step-end infinite; vertical-align: text-bottom; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .meta-panel { border-top: 1px solid var(--border); padding: 12px 24px; font-size: 12px; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; }
+  .meta-item { display: flex; flex-direction: column; gap: 2px; }
+  .meta-val { color: var(--text); font-weight: 600; }
+  .attempt { display: flex; gap: 8px; align-items: center; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.ok { background: var(--green); }
+  .dot.fail { background: var(--red); }
+  .copy-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .error-msg { color: var(--red); background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; padding: 12px 16px; }
+  .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pedro-llm-router</h1>
+  <span>playground</span>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <div>
+      <label>OpenRouter API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-or-..." />
+    </div>
+    <div>
+      <label>Modelos (orden = prioridad)</label>
+      <div class="models-list" id="modelsList"></div>
+      <button class="btn-add" onclick="addModel()">+ añadir modelo</button>
+    </div>
+    <div>
+      <label>Reintentos por modelo</label>
+      <input type="number" id="retryPerModel" value="2" min="1" max="10" />
+    </div>
+    <div>
+      <label>Timeout (ms)</label>
+      <input type="number" id="timeoutMs" value="30000" min="1000" />
+    </div>
+    <div>
+      <label>System prompt (opcional)</label>
+      <textarea id="system" rows="3" placeholder="Eres un asistente conciso..."></textarea>
+    </div>
+    <div>
+      <label>Prompt</label>
+      <textarea id="prompt" rows="4" placeholder="Escribe tu mensaje..."></textarea>
+    </div>
+    <button class="send-btn" id="sendBtn" onclick="send()">Enviar</button>
+    <div>
+      <button class="copy-btn" onclick="copyCode()">Copiar código Python</button>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="output-area" id="output"></div>
+    <div class="meta-panel" id="metaPanel" style="display:none"></div>
+  </main>
+</div>
+
+<script>
+const DEFAULT_MODELS = [
+  "anthropic/claude-3.5-sonnet",
+  "mistral/mixtral-8x7b-instruct",
+];
+
+function addModel(value = "") {
+  const list = document.getElementById("modelsList");
+  const row = document.createElement("div");
+  row.className = "model-row";
+  row.innerHTML = `<input type="text" value="${value}" placeholder="provider/model-name" />
+    <button class="btn-icon" onclick="this.parentElement.remove()">×</button>`;
+  list.appendChild(row);
+}
+
+function getModels() {
+  return [...document.querySelectorAll(".model-row input")]
+    .map(i => i.value.trim()).filter(Boolean);
+}
+
+let currentSource = null;
+
+async function send() {
+  const apiKey = document.getElementById("apiKey").value.trim();
+  const prompt = document.getElementById("prompt").value.trim();
+  if (!apiKey || !prompt) { alert("Necesitas API key y prompt"); return; }
+
+  const btn = document.getElementById("sendBtn");
+  btn.disabled = true;
+
+  const output = document.getElementById("output");
+  const metaPanel = document.getElementById("metaPanel");
+  metaPanel.style.display = "none";
+
+  const msgEl = document.createElement("div");
+  msgEl.className = "message";
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+  msgEl.appendChild(cursor);
+  output.appendChild(msgEl);
+  output.scrollTop = output.scrollHeight;
+
+  const payload = {
+    api_key: apiKey,
+    models: getModels(),
+    prompt,
+    system: document.getElementById("system").value.trim(),
+    retry_per_model: parseInt(document.getElementById("retryPerModel").value),
+    timeout_ms: parseInt(document.getElementById("timeoutMs").value),
+  };
+
+  const resp = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop();
+    for (const part of parts) {
+      const lines = part.split("\n");
+      const eventLine = lines.find(l => l.startsWith("event: "));
+      const dataLine = lines.find(l => l.startsWith("data: "));
+      if (!dataLine) continue;
+      const data = dataLine.slice(6);
+      const event = eventLine ? eventLine.slice(7) : "token";
+
+      if (event === "token") {
+        fullText += data;
+        msgEl.textContent = fullText;
+        msgEl.appendChild(cursor);
+        output.scrollTop = output.scrollHeight;
+      } else if (event === "metadata") {
+        cursor.remove();
+        renderMeta(JSON.parse(data));
+      } else if (event === "error") {
+        cursor.remove();
+        msgEl.classList.add("error-msg");
+        msgEl.textContent = "Error: " + data;
+      }
+    }
+  }
+
+  btn.disabled = false;
+}
+
+function renderMeta(meta) {
+  const panel = document.getElementById("metaPanel");
+  panel.style.display = "flex";
+  const ok = meta.succeeded;
+  const color = ok ? "var(--green)" : "var(--red)";
+  panel.innerHTML = `
+    <div class="meta-item"><span>Modelo</span><span class="meta-val" style="color:${color}">${meta.winning_model || "—"}</span></div>
+    <div class="meta-item"><span>Latencia</span><span class="meta-val">${meta.total_latency_ms.toFixed(0)} ms</span></div>
+    <div class="meta-item"><span>Tokens</span><span class="meta-val">${meta.total_tokens}</span></div>
+    <div class="meta-item"><span>Failovers</span><span class="meta-val">${meta.failover_count}</span></div>
+    <div class="meta-item"><span>Intentos</span><span class="meta-val">${meta.attempts.map(a =>
+      `<span class="attempt"><span class="dot ${a.success ? 'ok' : 'fail'}"></span>${a.model} #${a.attempt_number} ${a.latency_ms.toFixed(0)}ms${a.error_type ? ' ('+a.error_type+')' : ''}</span>`
+    ).join("")}</span></div>
+  `;
+}
+
+function copyCode() {
+  const apiKey = document.getElementById("apiKey").value.trim();
+  const models = getModels();
+  const prompt = document.getElementById("prompt").value.trim();
+  const system = document.getElementById("system").value.trim();
+  const retryPerModel = document.getElementById("retryPerModel").value;
+  const timeoutMs = document.getElementById("timeoutMs").value;
+
+  const msgs = system
+    ? `[ChatMessage(role="system", content=${JSON.stringify(system)}), ChatMessage(role="user", content=${JSON.stringify(prompt)})]`
+    : `[ChatMessage(role="user", content=${JSON.stringify(prompt)})]`;
+
+  const code = `import asyncio
+from pedro_llm_router import FailoverRouter, RouterConfig, ChatMessage
+
+config = RouterConfig(
+    openrouter_api_key="${apiKey}",
+    models=${JSON.stringify(models)},
+    retryPerModel=${retryPerModel},
+    timeoutMs=${timeoutMs},
+)
+router = FailoverRouter(config)
+
+async def main():
+    messages = ${msgs}
+    async for item in router.stream(messages):
+        if isinstance(item, str):
+            print(item, end="", flush=True)
+        else:
+            print(f"\\nModelo: {item.winning_model}, latencia: {item.total_latency_ms:.0f}ms")
+
+asyncio.run(main())`;
+
+  navigator.clipboard.writeText(code).then(() => {
+    const btn = event.target;
+    btn.textContent = "¡Copiado!";
+    setTimeout(() => { btn.textContent = "Copiar código Python"; }, 2000);
+  });
+}
+
+// Inicializar con modelos por defecto
+DEFAULT_MODELS.forEach(m => addModel(m));
+</script>
+</body>
+</html>
