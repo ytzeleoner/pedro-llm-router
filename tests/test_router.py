@@ -9,7 +9,7 @@ from httpx import Response
 
 import pedro_llm_router
 from pedro_llm_router import ChatMessage, FailoverRouter, RouteMetadata, RouterConfig, RouterError
-from tests.conftest import sse_response
+from .conftest import sse_response
 
 
 # ── API pública estable ────────────────────────────────────────────────────────
