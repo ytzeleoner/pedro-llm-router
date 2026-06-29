@@ -32,6 +32,34 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
+def _load_models_from_gdrive() -> list[str]:
+    """Lee la lista de modelos desde llm-router.json en Google Drive (pedro-gdrive)."""
+    try:
+        from pedro_gdrive import read_json  # type: ignore[import]
+    except ImportError as e:
+        raise RouterError(
+            "pedro-llm-router necesita pedro-gdrive para leer modelos. "
+            "Instala con: pip install pedro-llm-router[gdrive]",
+            RouteMetadata(),
+        ) from e
+
+    data = read_json("llm-router")
+    if data is None:
+        raise RouterError(
+            "No existe llm-router.json en Google Drive. "
+            "Créalo desde pedro-config antes de usar el router.",
+            RouteMetadata(),
+        )
+    models: list[str] = data.get("models", [])
+    if not models:
+        raise RouterError(
+            "llm-router.json en Google Drive no contiene ningún modelo. "
+            "Ejecuta 'check-free-models' en pedro-config para poblar la lista.",
+            RouteMetadata(),
+        )
+    return models
+
+
 class RouterError(Exception):
     """Todos los modelos fallaron y neverGiveUp=False. Incluye metadata parcial."""
     def __init__(self, message: str, metadata: RouteMetadata) -> None:
@@ -73,7 +101,7 @@ class FailoverRouter:
         request_id = request_id or str(uuid.uuid4())
         started = time.monotonic()
         all_attempts: list[AttemptRecord] = []
-        models = list(self.config.models)
+        models = list(self.config.models) if self.config.models else _load_models_from_gdrive()
         model_index = 0
         models_tried: set[str] = set()
 

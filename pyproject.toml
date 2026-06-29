@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "respx"]
 playground = ["fastapi", "uvicorn[standard]"]
+gdrive = ["pedro-gdrive @ git+https://github.com/ytzeleoner/pedro-gdrive.git@master"]
 
 [tool.setuptools.packages.find]
 where = ["."]
