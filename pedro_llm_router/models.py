@@ -9,8 +9,9 @@ from pydantic import BaseModel, Field
 
 
 class RouterConfig(BaseModel):
-    """Configuración del FailoverRouter. Serializable a/desde JSON."""
+    """Configuracion del FailoverRouter. Serializable a/desde JSON."""
     openrouter_api_key: str = ""
+    groq_api_key: str = ""
     models: list[str] = Field(default_factory=list)
     retryPerModel: int = 3
     delayBetweenRetriesMs: int = 1000

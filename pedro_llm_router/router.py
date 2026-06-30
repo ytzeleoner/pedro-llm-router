@@ -29,7 +29,21 @@ from .models import AttemptRecord, ChatMessage, RouteMetadata, RouterConfig
 logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+GROQ_BASE = "https://api.groq.com/openai/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+# Prefijos de provider soportados: "groq:<model_id>"
+_PROVIDER_PREFIXES = ("groq:",)
+
+
+def _resolve_provider(model_id: str, config) -> tuple[str, str, str]:
+    """
+    Devuelve (base_url, api_key, real_model_id) segun el prefijo del model_id.
+    Sin prefijo → OpenRouter. Con prefijo 'groq:' → Groq.
+    """
+    if model_id.startswith("groq:"):
+        return GROQ_BASE, config.groq_api_key, model_id[len("groq:"):]
+    return OPENROUTER_BASE, config.openrouter_api_key, model_id
 
 
 def _load_models_from_gdrive() -> list[str]:
@@ -174,19 +188,22 @@ class FailoverRouter:
             attempt_tokens = 0
 
             try:
+                base_url, api_key, real_model = _resolve_provider(model, self.config)
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
+                if base_url == OPENROUTER_BASE:
+                    headers["HTTP-Referer"] = "http://localhost"
+                    headers["X-Title"] = "pedro-llm-router"
                 timeout = httpx.Timeout(self.config.timeoutMs / 1000)
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     async with client.stream(
                         "POST",
-                        f"{OPENROUTER_BASE}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.config.openrouter_api_key}",
-                            "HTTP-Referer": "http://localhost",
-                            "X-Title": "pedro-llm-router",
-                            "Content-Type": "application/json",
-                        },
+                        f"{base_url}/chat/completions",
+                        headers=headers,
                         json={
-                            "model": model,
+                            "model": real_model,
                             "messages": [m.model_dump() for m in messages],
                             "stream": True,
                         },
