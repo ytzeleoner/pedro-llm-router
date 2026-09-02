@@ -20,6 +20,8 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import AsyncGenerator
 
 import httpx
@@ -30,20 +32,55 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 GROQ_BASE = "https://api.groq.com/openai/v1"
+ORCAROUTER_BASE = "https://api.orcarouter.ai/v1"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
-# Prefijos de provider soportados: "groq:<model_id>"
-_PROVIDER_PREFIXES = ("groq:",)
+# Providers con prefijo: "<prefijo><model_id>" → (base_url, campo de RouterConfig
+# con la api key). Un model_id sin ninguno de estos prefijos va a OpenRouter.
+# Todos exponen la API de chat completions de OpenAI, así que el cliente es el mismo.
+_PROVIDERS: dict[str, tuple[str, str]] = {
+    "groq:": (GROQ_BASE, "groq_api_key"),
+    "orca:": (ORCAROUTER_BASE, "orcarouter_api_key"),
+}
+
+_PROVIDER_PREFIXES = tuple(_PROVIDERS)
 
 
 def _resolve_provider(model_id: str, config) -> tuple[str, str, str]:
     """
     Devuelve (base_url, api_key, real_model_id) segun el prefijo del model_id.
-    Sin prefijo → OpenRouter. Con prefijo 'groq:' → Groq.
+    Sin prefijo → OpenRouter. Con prefijo ('groq:', 'orca:') → ese provider.
     """
-    if model_id.startswith("groq:"):
-        return GROQ_BASE, config.groq_api_key, model_id[len("groq:"):]
+    for prefix, (base_url, key_attr) in _PROVIDERS.items():
+        if model_id.startswith(prefix):
+            return base_url, getattr(config, key_attr), model_id[len(prefix):]
     return OPENROUTER_BASE, config.openrouter_api_key, model_id
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """
+    Convierte la cabecera Retry-After a segundos.
+
+    Admite los dos formatos del RFC: segundos ("12") y fecha HTTP
+    ("Wed, 21 Oct 2026 07:28:00 GMT"). Devuelve None si falta o no se entiende.
+    Un valor negativo (fecha ya pasada) se normaliza a 0.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if retry_at is None:
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
 
 def _load_models_from_gdrive() -> list[str]:
@@ -168,24 +205,40 @@ class FailoverRouter:
         Yields tokens del intento exitoso.
         Escribe [succeeded, total_tokens, attempts] en result_holder al terminar.
 
+        Excepción al backoff: en un 429 se respeta la cabecera Retry-After. Los
+        tiers gratuitos recargan la ventana de golpe (no gradualmente), así que
+        esperar el tiempo exacto que indica el provider es lo correcto; el
+        backoff exponencial solo desperdiciaría cuota. Si el 429 no trae
+        Retry-After no se reintenta: se pasa al siguiente modelo.
+
         Patrón result_holder: los async generators de Python no pueden usar
         `return value` hacia el caller que itera con `async for`, así que
         comunicamos el resultado escribiendo en una lista mutable.
         """
         attempts: list[AttemptRecord] = []
         total_tokens = 0
+        retry_after: float | None = None
 
         for attempt_num in range(self.config.retryPerModel):
             if attempt_num > 0:
-                delay = (self.config.delayBetweenRetriesMs / 1000) * (2 ** (attempt_num - 1))
-                logger.debug("Backoff %.2fs antes del intento %d en %s", delay, attempt_num, model)
+                if retry_after is not None:
+                    delay = retry_after
+                    logger.info(
+                        "Retry-After %.2fs antes del intento %d en %s", delay, attempt_num, model,
+                    )
+                else:
+                    delay = (self.config.delayBetweenRetriesMs / 1000) * (2 ** (attempt_num - 1))
+                    logger.debug("Backoff %.2fs antes del intento %d en %s", delay, attempt_num, model)
                 await asyncio.sleep(delay)
+
+            retry_after = None
 
             attempt_start_ts = time.time()
             error_type: str | None = None
             error_detail: str | None = None
             success = False
             attempt_tokens = 0
+            abandon_model = False
 
             try:
                 base_url, api_key, real_model = _resolve_provider(model, self.config)
@@ -216,6 +269,29 @@ class FailoverRouter:
                                 "HTTP %d de %s (intento %d): %s",
                                 response.status_code, model, attempt_num, error_detail[:100],
                             )
+                            if response.status_code == 429:
+                                retry_after = _parse_retry_after(
+                                    response.headers.get("Retry-After")
+                                )
+                                max_wait = self.config.timeoutMs / 1000
+                                if retry_after is None:
+                                    # Sin Retry-After, reintentar no aporta: el provider no
+                                    # dice cuándo se libera la cuota.
+                                    logger.warning(
+                                        "429 de %s sin Retry-After — pasando al siguiente modelo",
+                                        model,
+                                    )
+                                    abandon_model = True
+                                elif retry_after > max_wait:
+                                    # Bloquear más que el timeout no compensa habiendo más
+                                    # modelos en la cadena.
+                                    logger.warning(
+                                        "429 de %s con Retry-After %.0fs > timeout %.0fs — "
+                                        "pasando al siguiente modelo",
+                                        model, retry_after, max_wait,
+                                    )
+                                    retry_after = None
+                                    abandon_model = True
                         elif response.status_code >= 400:
                             body = await response.aread()
                             error_type = f"http_{response.status_code}"
@@ -268,6 +344,9 @@ class FailoverRouter:
             if success:
                 result_holder.append((True, total_tokens, attempts))
                 return
+
+            if abandon_model:
+                break
 
         result_holder.append((False, total_tokens, attempts))
 

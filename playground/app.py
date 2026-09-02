@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -24,6 +25,10 @@ async def index() -> FileResponse:
 
 class ChatPayload(BaseModel):
     api_key: str
+    # Keys de los providers con prefijo. Si no llegan en el payload se leen del
+    # entorno; sin ellas los modelos 'groq:' / 'orca:' fallan con 401.
+    groq_api_key: str = ""
+    orcarouter_api_key: str = ""
     models: list[str]
     prompt: str
     system: str = ""
@@ -36,6 +41,10 @@ async def chat(payload: ChatPayload):
     """SSE endpoint: stream de tokens + metadata al final."""
     config = RouterConfig(
         openrouter_api_key=payload.api_key,
+        groq_api_key=payload.groq_api_key or os.environ.get("GROQ_API_KEY", "").strip(),
+        orcarouter_api_key=(
+            payload.orcarouter_api_key or os.environ.get("ORCAROUTER_API_KEY", "").strip()
+        ),
         models=payload.models,
         retryPerModel=payload.retry_per_model,
         timeoutMs=payload.timeout_ms,
