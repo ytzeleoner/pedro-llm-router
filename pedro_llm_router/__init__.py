@@ -2,7 +2,7 @@
 from .models import AttemptRecord, ChatMessage, RouteMetadata, RouterConfig
 from .router import FailoverRouter, RouterError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "FailoverRouter",
